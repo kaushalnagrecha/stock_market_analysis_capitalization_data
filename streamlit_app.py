@@ -1,116 +1,128 @@
 import streamlit as st
-import plotly.express as px
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import yfinance as yf
-from datetime import date, timedelta
 
-today = date(2025, 4, 19)
-yesterday = today - timedelta(days=1)
-yesterday_str = yesterday.strftime("%Y-%m-%d")
+# -----------------------------
+# Page config
+# -----------------------------
+st.set_page_config(page_title="Large Cap Financial Dashboard", layout="wide")
+st.title("📈 Large Cap Financial Dashboard")
 
-# --- Data Fetching ---
-@st.cache_data
-def fetch_top_n_market_cap(date_str, n=10):
-    # Using a list of well-known large-cap companies as a starting point
-    # as directly fetching historical top market cap data is complex.
-    # This list can be expanded or modified.
-    large_cap_tickers = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK.A", "TSM", "TSLA", "LLY", "JPM", "V", "XOM", "MA"]
-    data = yf.download(large_cap_tickers, start=date_str, end=date_str)
-    if not data.empty:
-        latest_prices = data['Adj Close'].iloc[-1]
-        market_caps = {}
-        for ticker, price in latest_prices.items():
-            try:
-                # Get shares outstanding (approximation using info)
-                ticker_info = yf.Ticker(ticker).info
-                shares_outstanding = ticker_info.get('sharesOutstanding')
-                if shares_outstanding:
-                    market_caps[ticker] = price * shares_outstanding
-            except Exception as e:
-                print(f"Could not fetch shares outstanding for {ticker}: {e}")
+# Color scales
+risk_colorscale = [[0.0, "green"], [0.5, "yellow"], [1.0, "red"]]
+payout_colorscale = [[0.0, "red"], [0.5, "yellow"], [1.0, "green"]]
 
-        market_cap_df = pd.DataFrame(list(market_caps.items()), columns=['Ticker', 'Market Cap'])
-        market_cap_df_sorted = market_cap_df.sort_values(by='Market Cap', ascending=False).head(n)
-        return market_cap_df_sorted
-    else:
-        return pd.DataFrame({'Ticker': [], 'Market Cap': []})
+# -----------------------------
+# Fetch data
+# -----------------------------
+large_cap_tickers = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "TSLA", "NFLX", "ORCL", "CRM", "CSCO", "IBM", "PLTR", "INTU", "V", "MA"]
+info = {}
 
-@st.cache_data
-def fetch_company_info(tickers):
-    info = {}
-    for ticker in tickers:
-        try:
-            company = yf.Ticker(ticker)
-            info[ticker] = {
-                'sector': company.info.get('sector', 'N/A'),
-                'industry': company.info.get('industry', 'N/A'),
-                'longBusinessSummary': company.info.get('longBusinessSummary', 'N/A')
-            }
-        except Exception as e:
-            print(f"Error fetching info for {ticker}: {e}")
-            info[ticker] = {'sector': 'N/A', 'industry': 'N/A', 'longBusinessSummary': 'N/A'}
-    return pd.DataFrame.from_dict(info, orient='index')
+for ticker in large_cap_tickers:
+    try:
+        company = yf.Ticker(ticker)
+        data = company.info
+        info[ticker] = {
+            'Ticker': ticker,
+            'Sector': data.get('sector', 'N/A'),
+            'Industry': data.get('industry', 'N/A'),
+            'Market Cap': data.get('marketCap', 'N/A'),
+            'Display Name': data.get('shortName', 'N/A'),
+            'Employees': data.get('fullTimeEmployees', 'N/A'),
+            'Overall Risk': data.get('overallRisk', 'N/A'),
+            'Earnings Quarterly Growth': data.get('earningsQuarterlyGrowth', 'N/A'),
+            'Payout Ratio': data.get('payoutRatio', 'N/A'),
+            'Dividend Yield': data.get('dividendYield', 'N/A')
+        }
+    except Exception as e:
+        st.warning(f"Error fetching info for {ticker}: {e}")
 
-top_companies_df = fetch_top_n_market_cap(yesterday_str)
+df = pd.DataFrame.from_dict(info, orient='index')
+df = df[df.apply(lambda row: all(val != 'N/A' for val in row), axis=1)]
+df = df.sort_values(by='Market Cap', ascending=False).head(10)
 
-if not top_companies_df.empty:
-    top_tickers = top_companies_df['Ticker'].tolist()
-    company_info_df = fetch_company_info(top_tickers)
-    company_info_df['Ticker'] = company_info_df.index
-    merged_df = pd.merge(top_companies_df, company_info_df, on='Ticker')
-else:
-    st.error("Could not fetch top companies data.")
-    st.stop()
+# Type conversion
+df['Market Cap'] = df['Market Cap'].astype(float) / 1e9  # Billions
+df['Employees'] = df['Employees'].astype(int)
+df['Dividend Yield'] = df['Dividend Yield'].astype(float)
+df['Payout Ratio'] = df['Payout Ratio'].astype(float)
+df['Earnings Quarterly Growth'] = df['Earnings Quarterly Growth'].astype(float)
+df['Overall Risk'] = df['Overall Risk'].astype(int)
 
-# --- Streamlit Dashboard ---
-st.title(f"Top 10 Companies by Market Capitalization ({yesterday_str})")
-st.subheader("Visual Comparison")
+# Derived columns
+df['Risk-Adjusted Dividend'] = df['Dividend Yield'] / df['Overall Risk']
+df['Value Index'] = (df['Earnings Quarterly Growth'] + df['Dividend Yield']) / (df['Overall Risk'] * df['Payout Ratio'])
 
-# 1. Bar Chart of Market Capitalization
-fig_market_cap = px.bar(merged_df, x='Ticker', y='Market Cap', title='Market Capitalization of Top 10 Companies',
-                        labels={'Market Cap': 'Market Capitalization (USD)'})
-st.plotly_chart(fig_market_cap)
+# -----------------------------
+# Helper: Bar Chart
+# -----------------------------
+def bar_chart(x, y, color, title, color_scale=None):
+    fig = px.bar(df, x=x, y=y, color=color, 
+                 color_continuous_scale=color_scale if color_scale else None,
+                 title=title, hover_name="Display Name")
+    fig.update_layout(xaxis_title=None, yaxis_title=None)
+    return fig
 
-# 2. Bar Chart of Companies by Sector
-sector_counts = merged_df['sector'].value_counts().reset_index()
-sector_counts.columns = ['Sector', 'Number of Companies']
-fig_sector = px.bar(sector_counts, x='Sector', y='Number of Companies', title='Number of Top Companies per Sector',
-                    labels={'Number of Companies': 'Count'})
-st.plotly_chart(fig_sector)
+# -----------------------------
+# First 8 charts (in columns)
+# -----------------------------
+col1, col2 = st.columns(2)
 
-# 3. Bar Chart of Companies by Industry (Top 5)
-industry_counts = merged_df['industry'].value_counts().head(5).reset_index()
-industry_counts.columns = ['Industry', 'Number of Companies']
-fig_industry = px.bar(industry_counts, x='Industry', y='Number of Companies', title='Number of Top Companies per Industry (Top 5)',
-                      labels={'Number of Companies': 'Count'})
-st.plotly_chart(fig_industry)
+with col1:
+    st.subheader("1. Market Capitalization by Company (Billion $)")
+    st.plotly_chart(bar_chart("Display Name", "Market Cap", "Industry", "Market Cap by Industry"), use_container_width=True)
 
-# 4. Scatter Plot of Market Cap vs. Sector (using categorical color)
-fig_scatter_sector = px.scatter(merged_df, x='Ticker', y='Market Cap', color='sector',
-                                title='Market Capitalization by Sector',
-                                labels={'Market Cap': 'Market Capitalization (USD)'})
-st.plotly_chart(fig_scatter_sector)
+    st.subheader("3. Dividend Yield by Risk")
+    st.plotly_chart(bar_chart("Display Name", "Dividend Yield", "Overall Risk", "Dividend Yield vs Risk", color_scale=risk_colorscale), use_container_width=True)
 
-# 5. Scatter Plot of Market Cap vs. Industry (using categorical color)
-fig_scatter_industry = px.scatter(merged_df, x='Ticker', y='Market Cap', color='industry',
-                                  title='Market Capitalization by Industry',
-                                  labels={'Market Cap': 'Market Capitalization (USD)'})
-st.plotly_chart(fig_scatter_industry)
+    st.subheader("5. Quarterly Earnings Growth by Risk")
+    st.plotly_chart(bar_chart("Display Name", "Earnings Quarterly Growth", "Overall Risk", "Earnings Growth vs Risk", color_scale=risk_colorscale), use_container_width=True)
 
-# 6. Table of Company Information
-st.subheader("Company Information")
-st.dataframe(merged_df[['Ticker', 'Market Cap', 'sector', 'industry']])
+    st.subheader("7. Market Cap vs Employees")
+    fig7 = px.scatter(
+        df, x="Market Cap", y="Employees", size="Dividend Yield", color="Overall Risk",
+        color_continuous_scale=risk_colorscale, hover_name="Display Name",
+        title="Market Cap vs Employees (Bubble Size = Dividend Yield)"
+    )
+    st.plotly_chart(fig7, use_container_width=True)
 
-# 7. Text Display of Business Summaries (Expandable)
-st.subheader("Business Summaries")
-for index, row in merged_df.iterrows():
-    with st.expander(f"Summary for {row['Ticker']}"):
-        st.write(row['longBusinessSummary'])
+    st.subheader("9. Custom Value Index")
+    st.plotly_chart(bar_chart("Display Name", "Value Index", "Overall Risk", "Value Index of Companies", color_scale=risk_colorscale), use_container_width=True)
 
-# --- Dataset as of Today ---
-st.subheader(f"Top 10 Companies Data (as of {today.strftime('%Y-%m-%d')})")
-today_df = fetch_top_n_market_cap(today.strftime("%Y-%m-%d"))
-if not today_df.empty:
-    st.dataframe(today_df)
-else:
-    st.info("Today's market data might not be fully available yet.")
+with col2:
+    st.subheader("2. Employees by Company")
+    st.plotly_chart(bar_chart("Display Name", "Employees", "Industry", "Employees by Industry"), use_container_width=True)
+
+    st.subheader("4. Quarterly Earnings Growth by Industry")
+    st.plotly_chart(bar_chart("Display Name", "Earnings Quarterly Growth", "Industry", "Earnings Growth by Industry"), use_container_width=True)
+
+    st.subheader("6. Earnings Growth by Payout Ratio")
+    st.plotly_chart(bar_chart("Display Name", "Earnings Quarterly Growth", "Payout Ratio", "Earnings Growth vs Payout Ratio", color_scale=payout_colorscale), use_container_width=True)
+
+    st.subheader("8. Risk-Adjusted Dividend Yield")
+    st.plotly_chart(bar_chart("Display Name", "Risk-Adjusted Dividend", "Overall Risk", "Dividend ÷ Risk", color_scale=risk_colorscale), use_container_width=True)
+
+    st.subheader("🔍 Radar Chart: Company Financial Profile")
+    radar_company = st.selectbox("Choose a Company for Radar Chart", df["Display Name"])
+    row = df[df["Display Name"] == radar_company].iloc[0]
+
+    radar_data = {
+        'Market Cap': row['Market Cap'] / df['Market Cap'].max(),
+        'Employees': row['Employees'] / df['Employees'].max(),
+        'Dividend Yield': row['Dividend Yield'] / df['Dividend Yield'].max(),
+        'Earnings Growth': row['Earnings Quarterly Growth'] / df['Earnings Quarterly Growth'].max(),
+        'Payout Ratio': row['Payout Ratio'] / df['Payout Ratio'].max()
+    }
+
+    fig_radar = go.Figure()
+    fig_radar.add_trace(go.Scatterpolar(
+        r=list(radar_data.values()),
+        theta=list(radar_data.keys()),
+        fill='toself',
+        name=radar_company
+    ))
+    fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+                            showlegend=False, title=f"{radar_company} Profile Radar")
+    st.plotly_chart(fig_radar, use_container_width=True)
